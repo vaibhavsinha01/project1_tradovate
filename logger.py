@@ -2,9 +2,7 @@ import logging
 import os
 from datetime import datetime
 
-
 LOG_DIR = "logs"
-
 
 def get_logger(name: str = "trading_bot", level: int = logging.DEBUG) -> logging.Logger:
     """

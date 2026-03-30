@@ -1,5 +1,6 @@
 import requests
 from logger import get_logger
+from config import *
 
 logger = get_logger()
 
@@ -51,19 +52,11 @@ class TradovateBroker:
         self.account_id = accounts[0]["id"]
         logger.info(f"Connected. Account ID: {self.account_id}")
 
-    # ------------------------------------------------------------------ #
-    #  Market data                                                         #
-    # ------------------------------------------------------------------ #
-
     def fetch_data(self, contract_id: int) -> dict:
         """Return the latest quote for a given contract id."""
         data = self._get(f"md/getQuote?contractId={contract_id}")
         logger.debug(f"Quote for contractId={contract_id}: {data}")
         return data
-
-    # ------------------------------------------------------------------ #
-    #  Orders                                                              #
-    # ------------------------------------------------------------------ #
 
     def place_order(
         self,
@@ -122,14 +115,6 @@ class TradovateBroker:
 
         logger.info(f"close_all_orders: {len(results)} action(s) taken.")
         return results
-
-    def set_leverage(self) -> None:
-        """Not supported — Tradovate uses fixed margin per contract."""
-        raise NotImplementedError("Tradovate does not expose a leverage-setting endpoint.")
-
-    # ------------------------------------------------------------------ #
-    #  Trade data                                                          #
-    # ------------------------------------------------------------------ #
 
     def get_trade(self, order_id: int) -> dict:
         """Fetch full details for a single order by its id."""
@@ -193,10 +178,6 @@ class TradovateBroker:
         logger.debug(f"Position PnL: {result}")
         return result
 
-    # ------------------------------------------------------------------ #
-    #  Helpers                                                             #
-    # ------------------------------------------------------------------ #
-
     def _get(self, endpoint: str):
         resp = self.session.get(f"{BASE_URL}/{endpoint}")
         if not resp.ok:
@@ -210,3 +191,32 @@ class TradovateBroker:
             logger.error(f"POST {endpoint} failed [{resp.status_code}]: {resp.text}")
         resp.raise_for_status()
         return resp.json()
+    
+if __name__ == "__main__":
+    broker = TradovateBroker(username=USERNAME,password=PASSWORD,app_id=APP_ID,app_version=APP_VERSION,device_id=DEVICE_ID,cid=CID,sec=SEC)
+    broker.connect() # check the connection
+    df = broker.fetch_data(contract_id=CONTRACT_ID) # id for MSEM6 - may change after april so check
+    print(df)
+    place_order_response = broker.place_order(symbol=SYMBOL,action="BUY",quantity=1,order_type="Market",price=None,stop_price=None) # try placing a market 
+    print(place_order_response)
+    price = df['close'].iloc[-1]*1.01 # one percent higher price to buy
+    print(df['close'].iloc[-1]) # the latest price of the close price
+    print(df['close'].iloc[-2]) # get this price to check the validity of data , by comparing it in tradingview
+    print(price) # price calculated
+    get_trade_response = broker.get_trade(order_id="") # use this to check if the open posn != 0
+    print(get_trade_response)
+    cancel_order_response = broker.cancel_order(order_id="") # this should be filled based on the response that you get from placing the order
+    print(cancel_order_response)
+    limit_order_response = broker.place_order(symbol=SYMBOL,action="BUY",quantity=1,order_type="Limit",price=price,stop_price=price-1) # check the condition for a stop_price , when triggered
+    print(limit_order_response)
+    acc_summary = broker.get_account_summary() # get knowledge about the account 
+    print(acc_summary)
+    posn_pnl = broker.get_position_pnl(contract_id=CONTRACT_ID) # get the posn for the contracts 
+    print(posn_pnl)
+    trade_hist = broker.get_trade_history(n=5) # get the info for the last 5 trades
+    print(trade_hist)
+    open_posn = broker.get_open_positions() # get the positions 
+    print(open_posn)
+    cancel_order_response = broker.close_all_orders() # check if this function is working
+    print(cancel_order_response)
+
