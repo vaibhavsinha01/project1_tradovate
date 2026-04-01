@@ -5,12 +5,16 @@ import pandas as pd
 from utils.broker import TradovateBroker
 from logger import get_logger
 from modules.indicators import Indicators
-from modules.strategies import _signal_exhaustion_reversal,_signal_trendline_pullback,_signal_vwap_ema_continuation
+from modules.strategies import Strategy
+
 logger = get_logger()
+
 
 class TradingBot:
     def __init__(self):
         self.indicators = Indicators()
+        self.strategy   = Strategy()
+
         self.broker = TradovateBroker(
             username=USERNAME,
             password=PASSWORD,
@@ -22,11 +26,14 @@ class TradingBot:
         )
         self.broker.connect()
 
-        self.h_pos       = 0      #  0 = flat | +1 = long | -1 = short
+        self.h_pos       = 0      # 0 = flat | +1 = long | -1 = short
         self.entry_price = None
         self.sl_price    = None
         self.tp_price    = None
 
+    # ------------------------------------------------------------------
+    # Data fetching
+    # ------------------------------------------------------------------
     def fetch_data(self) -> dict[str, pd.DataFrame]:
         def _get_bars(unit_number: int, n_bars: int) -> pd.DataFrame:
             params = {
@@ -36,11 +43,16 @@ class TradingBot:
                 "unitNumber": unit_number,
                 "limit":      n_bars,
             }
-            raw  = self.broker._get("history/getBars?" + "&".join(f"{k}={v}" for k, v in params.items()))
+            raw  = self.broker._get(
+                "history/getBars?" + "&".join(f"{k}={v}" for k, v in params.items())
+            )
             bars = raw.get("bars", [])
             df   = pd.DataFrame(bars)
-            df.rename(columns={"t": "timestamp", "o": "open", "h": "high",
-                                "l": "low", "c": "close", "totalVolume": "volume"}, inplace=True)
+            df.rename(
+                columns={"t": "timestamp", "o": "open", "h": "high",
+                         "l": "low",       "c": "close", "totalVolume": "volume"},
+                inplace=True,
+            )
             df["timestamp"] = pd.to_datetime(df["timestamp"], unit="ms", utc=True)
             df.set_index("timestamp", inplace=True)
             return df[["open", "high", "low", "close", "volume"]].astype(float)
@@ -48,33 +60,78 @@ class TradingBot:
         return {
             "1m":  _get_bars(1,  200),
             "5m":  _get_bars(5,  100),
-            "30m": _get_bars(30, 60),
-            "1h":  _get_bars(60, 50),
+            "30m": _get_bars(30,  60),
+            "1h":  _get_bars(60,  50),
         }
 
+    # ------------------------------------------------------------------
+    # HTF S/R injection
+    # ------------------------------------------------------------------
+    def _inject_htf_sr(self, data: dict[str, pd.DataFrame]) -> pd.DataFrame:
+        """
+        Compute regression-based S/R on 30m and 1h, combine them, and
+        inject the resulting levels into the 1m DataFrame.
+
+        Returns the 1m DataFrame with `support_line` and `resistance_line`
+        columns populated from HTF data.
+        """
+        logger.info("[HTF] Injecting HTF S/R levels into 1m data...")
+        df_1m = self.indicators.compute_htf_sr(
+            df_30m=data["30m"],
+            df_1h=data["1h"],
+            df_1m=data["1m"],
+            window_30m=50,   # ~25 h of 30m bars
+            window_1h=30,    # 30 h of 1h bars
+        )
+        logger.info("[HTF] HTF S/R injection complete.")
+        return df_1m
+
+    # ------------------------------------------------------------------
+    # Signal generation
+    # ------------------------------------------------------------------
     def calculate_signals(self, data: dict[str, pd.DataFrame]) -> str:
         """
-        Runs all three signals. First non-HOLD result wins.
-        Priority: Signal1 (trendline) > Signal2 (continuation) > Signal3 (exhaustion)
+        1. Inject HTF S/R into 1m data.
+        2. Run Strategy (all 1m indicators + entry logic).
+        3. Read the signal from the last completed bar (iloc[-2]).
+           The last bar (iloc[-1]) may be incomplete in live trading.
+
+        Returns "BUY", "SELL", or "HOLD".
         """
-        s1 = _signal_trendline_pullback(data)
-        s2 = _signal_vwap_ema_continuation(data)
-        s3 = _signal_exhaustion_reversal(data)
+        # Step 1 — Inject HTF levels (no lookahead: ffill from closed HTF bars)
+        df_1m = self._inject_htf_sr(data)
 
-        logger.info(f"[SIGNALS] S1={s1} | S2={s2} | S3={s3}")
+        # Step 2 — Run strategy; skip_sr=True so HTF levels are preserved
+        df_1m = self.strategy.apply(df_1m, htf_sr_injected=True)
 
-        for sig in (s1, s2, s3):
-            if sig != "HOLD":
-                return sig
-        return "HOLD"
+        # Step 3 — Read signal from the last *closed* 1m bar
+        last = df_1m.iloc[-2]   # -1 is the still-forming candle
 
-    def _calculate_sl_tp(self, signal: str, entry: float, df1m: pd.DataFrame):
+        if last["long_entry"]:
+            signal = "BUY"
+        elif last["short_entry"]:
+            signal = "SELL"
+        else:
+            signal = "HOLD"
+
+        logger.info(
+            f"[SIGNALS] long_entry={last['long_entry']} | "
+            f"short_entry={last['short_entry']} → {signal}"
+        )
+        return signal
+
+    # ------------------------------------------------------------------
+    # SL / TP calculation
+    # ------------------------------------------------------------------
+    def _calculate_sl_tp(
+        self, signal: str, entry: float, df1m: pd.DataFrame
+    ) -> tuple[float, float]:
         """
         SL  = recent swing high (short) or swing low (long)
-        TP  = entry ± 2 x (entry - SL)   →  1:2 risk-to-reward
+        TP  = entry ± 2 × risk  →  1:2 risk-to-reward
         """
         if signal == "BUY":
-            sl = self.indicators.recent_swing_low(df1m["low"], lookback=10)
+            sl   = self.indicators.recent_swing_low(df1m["low"], lookback=10)
             risk = entry - sl
             tp   = entry + 2 * risk
         else:
@@ -82,9 +139,14 @@ class TradingBot:
             risk = sl - entry
             tp   = entry - 2 * risk
 
-        logger.info(f"[SL/TP] entry={entry:.2f} sl={sl:.2f} tp={tp:.2f} risk={risk:.2f}pts")
+        logger.info(
+            f"[SL/TP] entry={entry:.2f} | sl={sl:.2f} | tp={tp:.2f} | risk={risk:.2f}pts"
+        )
         return sl, tp
 
+    # ------------------------------------------------------------------
+    # Exit
+    # ------------------------------------------------------------------
     def _exit_trade(self) -> None:
         self.broker.close_all_orders()
         self.h_pos       = 0
@@ -93,7 +155,10 @@ class TradingBot:
         self.tp_price    = None
         logger.info("[EXEC] Position closed — h_pos reset to 0.")
 
-    def execute_signals(self, signal: str, data: dict) -> None:
+    # ------------------------------------------------------------------
+    # Execution
+    # ------------------------------------------------------------------
+    def execute_signals(self, signal: str, data: dict[str, pd.DataFrame]) -> None:
         if signal == "HOLD":
             logger.info(f"[EXEC] HOLD — h_pos unchanged ({self.h_pos})")
             return
@@ -108,16 +173,16 @@ class TradingBot:
                 logger.info("[EXEC] Exiting SELL before entering BUY.")
                 self._exit_trade()
 
-            resp         = self.broker.place_order(SYMBOL, "Buy", TRADE_QTY, order_type="Market")
-            fill         = resp.get("avgFillPrice") or resp.get("price") or df1m["close"].iloc[-1]
-            entry        = float(fill)
-            sl, tp       = self._calculate_sl_tp("BUY", entry, df1m)
+            resp   = self.broker.place_order(SYMBOL, "Buy", TRADE_QTY, order_type="Market")
+            fill   = resp.get("avgFillPrice") or resp.get("price") or df1m["close"].iloc[-1]
+            entry  = float(fill)
+            sl, tp = self._calculate_sl_tp("BUY", entry, df1m)
 
             self.h_pos       = 1
             self.entry_price = entry
             self.sl_price    = sl
             self.tp_price    = tp
-            logger.info(f"[EXEC] BUY {TRADE_QTY} {SYMBOL} @ {entry:.2f} | SL={sl:.2f} TP={tp:.2f}")
+            logger.info(f"[EXEC] BUY {TRADE_QTY} {SYMBOL} @ {entry:.2f} | SL={sl:.2f} | TP={tp:.2f}")
 
         elif signal == "SELL":
             if self.h_pos == -1:
@@ -127,23 +192,26 @@ class TradingBot:
                 logger.info("[EXEC] Exiting BUY before entering SELL.")
                 self._exit_trade()
 
-            resp         = self.broker.place_order(SYMBOL, "Sell", TRADE_QTY, order_type="Market")
-            fill         = resp.get("avgFillPrice") or resp.get("price") or df1m["close"].iloc[-1]
-            entry        = float(fill)
-            sl, tp       = self._calculate_sl_tp("SELL", entry, df1m)
+            resp   = self.broker.place_order(SYMBOL, "Sell", TRADE_QTY, order_type="Market")
+            fill   = resp.get("avgFillPrice") or resp.get("price") or df1m["close"].iloc[-1]
+            entry  = float(fill)
+            sl, tp = self._calculate_sl_tp("SELL", entry, df1m)
 
             self.h_pos       = -1
             self.entry_price = entry
             self.sl_price    = sl
             self.tp_price    = tp
-            logger.info(f"[EXEC] SELL {TRADE_QTY} {SYMBOL} @ {entry:.2f} | SL={sl:.2f} TP={tp:.2f}")
+            logger.info(f"[EXEC] SELL {TRADE_QTY} {SYMBOL} @ {entry:.2f} | SL={sl:.2f} | TP={tp:.2f}")
 
+    # ------------------------------------------------------------------
+    # Position monitor
+    # ------------------------------------------------------------------
     def _check_position_open(self) -> bool:
         """
         Monitor mode — every tick while h_pos != 0:
-          1. Check dynamic SL/TP levels against live price
-          2. Verify broker still shows an open position
-          3. Reset h_pos to 0 if closed externally
+          1. Check dynamic SL/TP against live price.
+          2. Verify broker still shows an open position.
+          3. Reset h_pos to 0 if closed externally.
         """
         if self.entry_price is not None and self.sl_price is not None:
             pnl_data = self.broker.get_position_pnl(CONTRACT_ID)
@@ -181,28 +249,33 @@ class TradingBot:
         active = next(
             (p for p in positions
              if p.get("contractId") == CONTRACT_ID and p.get("netPos", 0) != 0),
-            None
+            None,
         )
         if active is None:
-            logger.info(f"[MONITOR] Position closed externally — resetting h_pos to 0.")
-            self.h_pos = 0; self.entry_price = None
-            self.sl_price = None; self.tp_price = None
+            logger.info("[MONITOR] Position closed externally — resetting h_pos to 0.")
+            self.h_pos       = 0
+            self.entry_price = None
+            self.sl_price    = None
+            self.tp_price    = None
             return False
 
         logger.info(
             f"[MONITOR] Position alive | netPos={active.get('netPos')} | "
-            f"avgEntry={active.get('netPrice')} | openPnl={active.get('openPnl','n/a')}"
+            f"avgEntry={active.get('netPrice')} | openPnl={active.get('openPnl', 'n/a')}"
         )
         return True
-    
+
+    # ------------------------------------------------------------------
+    # Main loop body
+    # ------------------------------------------------------------------
     def main(self) -> None:
         """
-        h_pos == 0  →  ENTRY MODE  : run all 3 signals, enter if triggered
+        h_pos == 0  →  ENTRY MODE  : compute HTF S/R, run strategy, enter if triggered
         h_pos != 0  →  MONITOR MODE: check dynamic SL/TP + broker position
         """
         try:
             if self.h_pos == 0:
-                logger.info("\n[BOT] ENTRY MODE — scanning all signals...")
+                logger.info("\n[BOT] ENTRY MODE — scanning for signals...")
                 data   = self.fetch_data()
                 signal = self.calculate_signals(data)
                 logger.info(f"[BOT] Final signal → {signal}")

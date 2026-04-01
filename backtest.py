@@ -1,89 +1,89 @@
-import sys
-import os
-sys.path.append(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
+# import sys
+# import os
+# sys.path.append(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
-from modules.strategies import _signal_macd_ultimate
-from backtesting import Backtest, Strategy
-import pandas as pd
-import numpy as np
+# from modules.strategies import _signal_macd_ultimate
+# from backtesting import Backtest, Strategy
+# import pandas as pd
+# import numpy as np
 
-class Macd_Ultimate(Strategy):
-    tp_pct = 150   # stored as basis points (1.5% = 150) to use range()
-    sl_pct = 75    # stored as basis points (0.75% = 75)
+# class Macd_Ultimate(Strategy):
+#     tp_pct = 150   # stored as basis points (1.5% = 150) to use range()
+#     sl_pct = 75    # stored as basis points (0.75% = 75)
 
-    def init(self):
-        df = pd.DataFrame({
-            'open':   self.data.Open,
-            'high':   self.data.High,
-            'low':    self.data.Low,
-            'close':  self.data.Close,
-            'volume': self.data.Volume,
-        })
+#     def init(self):
+#         df = pd.DataFrame({
+#             'open':   self.data.Open,
+#             'high':   self.data.High,
+#             'low':    self.data.Low,
+#             'close':  self.data.Close,
+#             'volume': self.data.Volume,
+#         })
 
-        result         = _signal_macd_ultimate(df)
-        macd_color_int = np.where(result['macd_color'] == 'red', 1, 0)
+#         result         = _signal_macd_ultimate(df)
+#         macd_color_int = np.where(result['macd_color'] == 'red', 1, 0)
 
-        self.macd_color = self.I(lambda x: x, macd_color_int,        name='macd_color')
-        self.cross      = self.I(lambda x: x, result['cross'].values, name='cross')
+#         self.macd_color = self.I(lambda x: x, macd_color_int,        name='macd_color')
+#         self.cross      = self.I(lambda x: x, result['cross'].values, name='cross')
 
-    def next(self):
-        if len(self.data) < 2:
-            return
+#     def next(self):
+#         if len(self.data) < 2:
+#             return
 
-        curr_color = self.macd_color[-1]
-        curr_cross = self.cross[-1]
-        price      = self.data.Close[-1]
+#         curr_color = self.macd_color[-1]
+#         curr_cross = self.cross[-1]
+#         price      = self.data.Close[-1]
 
-        tp = self.tp_pct / 10_000   # convert basis points back to decimal
-        sl = self.sl_pct / 10_000
+#         tp = self.tp_pct / 10_000   # convert basis points back to decimal
+#         sl = self.sl_pct / 10_000
 
-        if curr_cross and curr_color == 0:      # BUY
-            if not self.position.is_long:
-                if self.position:
-                    self.position.close()
-                self.buy(tp=price * (1 + tp), sl=price * (1 - sl))
+#         if curr_cross and curr_color == 0:      # BUY
+#             if not self.position.is_long:
+#                 if self.position:
+#                     self.position.close()
+#                 self.buy(tp=price * (1 + tp), sl=price * (1 - sl))
 
-        elif curr_cross and curr_color == 1:    # SELL
-            if not self.position.is_short:
-                if self.position:
-                    self.position.close()
-                self.sell(tp=price * (1 - tp), sl=price * (1 + sl))
+#         elif curr_cross and curr_color == 1:    # SELL
+#             if not self.position.is_short:
+#                 if self.position:
+#                     self.position.close()
+#                 self.sell(tp=price * (1 - tp), sl=price * (1 + sl))
 
 
-if __name__ == "__main__":
-    path = r"C:\Users\vaibh\OneDrive\Desktop\official_projects\data\ethusd.csv"
-    df   = pd.read_csv(path)
-    df.columns = df.columns.str.lower().str.strip()
+# if __name__ == "__main__":
+#     path = r"C:\Users\vaibh\OneDrive\Desktop\official_projects\data\ethusd.csv"
+#     df   = pd.read_csv(path)
+#     df.columns = df.columns.str.lower().str.strip()
 
-    df["Date"] = pd.to_datetime(df["time"])
-    df = df.set_index("Date").sort_index()
-    df = df.rename(columns={
-        "open": "Open", "high": "High",
-        "low":  "Low",  "close": "Close", "volume": "Volume"
-    })
-    df = df[["Open", "High", "Low", "Close", "Volume"]].copy()
+#     df["Date"] = pd.to_datetime(df["time"])
+#     df = df.set_index("Date").sort_index()
+#     df = df.rename(columns={
+#         "open": "Open", "high": "High",
+#         "low":  "Low",  "close": "Close", "volume": "Volume"
+#     })
+#     df = df[["Open", "High", "Low", "Close", "Volume"]].copy()
 
-    bt = Backtest(df, Macd_Ultimate, cash=10_000_000, commission=0, exclusive_orders=True)
+#     bt = Backtest(df, Macd_Ultimate, cash=10_000_000, commission=0, exclusive_orders=True)
 
-    stats, heatmap = bt.optimize(
-        tp_pct = range(50, 400, 25),    # 0.5% to 4.0% in 0.25% steps
-        sl_pct = range(25, 200, 25),    # 0.25% to 2.0% in 0.25% steps
-        maximize = "Equity Final [$]",
-        method   = "sambo",
-        return_heatmap       = True,
-        return_optimization  = False,
-        max_tries = 100,
-    )
+#     stats, heatmap = bt.optimize(
+#         tp_pct = range(50, 400, 25),    # 0.5% to 4.0% in 0.25% steps
+#         sl_pct = range(25, 200, 25),    # 0.25% to 2.0% in 0.25% steps
+#         maximize = "Equity Final [$]",
+#         method   = "sambo",
+#         return_heatmap       = True,
+#         return_optimization  = False,
+#         max_tries = 100,
+#     )
 
-    print(stats)
-    print(f"\nBest TP: {stats._strategy.tp_pct / 100:.2f}%")
-    print(f"Best SL: {stats._strategy.sl_pct / 100:.2f}%")
-    print("\n── Trade Log ──────────────────────────────────────────────────")
-    print(stats["_trades"].to_string())
+#     print(stats)
+#     print(f"\nBest TP: {stats._strategy.tp_pct / 100:.2f}%")
+#     print(f"Best SL: {stats._strategy.sl_pct / 100:.2f}%")
+#     print("\n── Trade Log ──────────────────────────────────────────────────")
+#     print(stats["_trades"].to_string())
 
-    trades_path = r"C:\Users\vaibh\OneDrive\Desktop\official_projects\data\trades_data\Macd_Ultimate_trades.csv"
-    stats["_trades"].to_csv(trades_path, index=False)
-    print(f"\nTrade log saved → {trades_path}")
+#     trades_path = r"C:\Users\vaibh\OneDrive\Desktop\official_projects\data\trades_data\Macd_Ultimate_trades.csv"
+#     stats["_trades"].to_csv(trades_path, index=False)
+#     print(f"\nTrade log saved → {trades_path}")
 
 # from modules.strategies import _signal_supertrend_indicator
 # from backtesting import Backtest, Strategy
@@ -180,118 +180,118 @@ if __name__ == "__main__":
 
 #     print(f"\nTrade log saved → {trades_path}")
 
-# from backtesting import Strategy
+from backtesting import Strategy
 
-# class SqueezeColor(Strategy):
-#     tp_pct = 150   # 1.5%
-#     sl_pct = 75    # 0.75%
+class SqueezeColor(Strategy):
+    tp_pct = 150   # 1.5%
+    sl_pct = 75    # 0.75%
 
-#     # same encoding you used
-#     COLOR_MAP = {
-#         "maroon": 0,
-#         "red": 1,
-#         "gray": 2,
-#         "blue": 3,
-#         "lime": 4,
-#         "green": 5,
-#         "black": 6
-#     }
+    # same encoding you used
+    COLOR_MAP = {
+        "maroon": 0,
+        "red": 1,
+        "gray": 2,
+        "blue": 3,
+        "lime": 4,
+        "green": 5,
+        "black": 6
+    }
 
-#     def init(self):
-#         # pass precomputed column
-#         self.bcolor = self.I(lambda x: x, self.data.bcolor_int, name="bcolor")
+    def init(self):
+        # pass precomputed column
+        self.bcolor = self.I(lambda x: x, self.data.bcolor_int, name="bcolor")
 
-#     def next(self):
-#         if len(self.data) < 2:
-#             return
+    def next(self):
+        if len(self.data) < 2:
+            return
 
-#         prev_color = self.bcolor[-2]
-#         curr_color = self.bcolor[-1]
-#         price      = self.data.Close[-1]
+        prev_color = self.bcolor[-2]
+        curr_color = self.bcolor[-1]
+        price      = self.data.Close[-1]
 
-#         tp = self.tp_pct / 10_000
-#         sl = self.sl_pct / 10_000
+        tp = self.tp_pct / 10_000
+        sl = self.sl_pct / 10_000
 
-#         # ── BUY: red → maroon ─────────────────────────────
-#         if prev_color == self.COLOR_MAP["red"] and curr_color == self.COLOR_MAP["maroon"]:
-#             if not self.position.is_long:
-#                 if self.position:
-#                     self.position.close()
+        # ── BUY: red → maroon ─────────────────────────────
+        if prev_color == self.COLOR_MAP["red"] and curr_color == self.COLOR_MAP["maroon"]:
+            if not self.position.is_long:
+                if self.position:
+                    self.position.close()
 
-#                 self.buy(
-#                     tp=price * (1 + tp),
-#                     sl=price * (1 - sl)
-#                 )
+                self.buy(
+                    tp=price * (1 + tp),
+                    sl=price * (1 - sl)
+                )
 
-#         # ── SELL: lime → green ────────────────────────────
-#         elif prev_color == self.COLOR_MAP["lime"] and curr_color == self.COLOR_MAP["green"]:
-#             if not self.position.is_short:
-#                 if self.position:
-#                     self.position.close()
+        # ── SELL: lime → green ────────────────────────────
+        elif prev_color == self.COLOR_MAP["lime"] and curr_color == self.COLOR_MAP["green"]:
+            if not self.position.is_short:
+                if self.position:
+                    self.position.close()
 
-#                 self.sell(
-#                     tp=price * (1 - tp),
-#                     sl=price * (1 + sl)
-#                 )
+                self.sell(
+                    tp=price * (1 - tp),
+                    sl=price * (1 + sl)
+                )
 
-# from backtesting import Backtest
-# import pandas as pd
+from backtesting import Backtest
+import pandas as pd
 
-# if __name__ == "__main__":
-#     path = r"C:\Users\vaibh\OneDrive\Desktop\alphas\strategy1.csv"
-#     df   = pd.read_csv(path)
+if __name__ == "__main__":
+    path = r"C:\Users\vaibh\OneDrive\Desktop\alphas\strategy1.csv"
+    df   = pd.read_csv(path)
 
-#     df.columns = df.columns.str.lower().str.strip()
+    df.columns = df.columns.str.lower().str.strip()
 
-#     df["Date"] = pd.to_datetime(df["time"], unit="ms")
-#     df = df.set_index("Date").sort_index()
+    df["Date"] = pd.to_datetime(df["time"], unit="ms")
+    df = df.set_index("Date").sort_index()
 
-#     df = df.rename(columns={
-#         "open": "Open", "high": "High",
-#         "low":  "Low",  "close": "Close", "volume": "Volume"
-#     })
+    df = df.rename(columns={
+        "open": "Open", "high": "High",
+        "low":  "Low",  "close": "Close", "volume": "Volume"
+    })
 
-#     df = df[["Open", "High", "Low", "Close", "Volume", "bcolor"]].copy()
+    df = df[["Open", "High", "Low", "Close", "Volume", "bcolor"]].copy()
 
-#     # Encode colors
-#     COLOR_MAP = {
-#         "maroon": 0,
-#         "red": 1,
-#         "gray": 2,
-#         "blue": 3,
-#         "lime": 4,
-#         "green": 5,
-#         "black": 6
-#     }
+    # Encode colors
+    COLOR_MAP = {
+        "maroon": 0,
+        "red": 1,
+        "gray": 2,
+        "blue": 3,
+        "lime": 4,
+        "green": 5,
+        "black": 6
+    }
 
-#     df["bcolor_int"] = df["bcolor"].str.strip().map(COLOR_MAP).fillna(-1).astype(int)
+    df["bcolor_int"] = df["bcolor"].str.strip().map(COLOR_MAP).fillna(-1).astype(int)
 
-#     bt = Backtest(
-#         df,
-#         SqueezeColor,
-#         cash=10_000_000,
-#         commission=0,
-#         exclusive_orders=True
-#     )
+    bt = Backtest(
+        df,
+        SqueezeColor,
+        cash=10_000_000,
+        commission=0,
+        exclusive_orders=True
+    )
 
-#     stats, heatmap = bt.optimize(
-#         tp_pct = range(50, 400, 25),
-#         sl_pct = range(25, 200, 25),
-#         maximize = "Equity Final [$]",
-#         method   = "sambo",
-#         return_heatmap      = True,
-#         return_optimization = False,
-#         max_tries = 100,
-#     )
+    stats, heatmap = bt.optimize(
+        tp_pct = range(50, 400, 25),
+        sl_pct = range(25, 200, 25),
+        maximize = "Equity Final [$]",
+        method   = "sambo",
+        return_heatmap      = True,
+        return_optimization = False,
+        max_tries = 100,
+    )
 
-#     print(stats)
-#     print(f"\nBest TP: {stats._strategy.tp_pct / 100:.2f}%")
-#     print(f"Best SL: {stats._strategy.sl_pct / 100:.2f}%")
+    print(stats)
+    print(f"\nBest TP: {stats._strategy.tp_pct / 100:.2f}%")
+    print(f"Best SL: {stats._strategy.sl_pct / 100:.2f}%")
 
-#     print("\n── Trade Log ─────────────────────────────────────────")
-#     print(stats["_trades"].to_string())
+    print("\n── Trade Log ─────────────────────────────────────────")
+    print(stats["_trades"].to_string())
 
-#     stats["_trades"].to_csv("squeeze_color_trades.csv", index=False)
+    stats["_trades"].to_csv("squeeze_color_trades.csv", index=False)
 
 # from modules.strategies import _signal_exhaustion_reversal
 # from backtesting import Strategy

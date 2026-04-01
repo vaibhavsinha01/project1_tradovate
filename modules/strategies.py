@@ -1,129 +1,137 @@
 from modules.indicators import Indicators
 import pandas as pd
 
-indicators = Indicators()
 
-def _signal_trendline_pullback(df1m: pd.DataFrame, dfhtf: pd.DataFrame) -> pd.DataFrame:
-    htf_struct = indicators.htf_structure(dfhtf["high"], dfhtf["low"])
-    vwap_df    = indicators.vwap(df1m, reset="D")
-    vwap_vals  = vwap_df["vwap"]
-    rsi_val    = indicators.rsi(df1m["close"]).iloc[-1]
-    struct_1m  = indicators.hh_hl_lh_ll(df1m)
-    latest     = struct_1m["structure"].iloc[-1]
+class Strategy:
+    def __init__(self):
+        self.indicators = Indicators()
 
-    if (
-        htf_struct == "BULLISH"
-        and indicators.near_trendline(df1m, mode="ascending")
-        and rsi_val < 45
-        and indicators.rsi_turning_up(df1m["close"])
-        and indicators.price_reclaimed_vwap(df1m["close"], vwap_vals)
-        and indicators.bullish_rejection_candle(df1m)
-        and "HH" in latest
-    ):
-        signal = "BUY"
-    elif (
-        htf_struct == "BEARISH"
-        and indicators.near_trendline(df1m, mode="descending")
-        and rsi_val > 55
-        and indicators.rsi_turning_down(df1m["close"])
-        and indicators.price_rejected_vwap(df1m["close"], vwap_vals)
-        and indicators.bearish_rejection_candle(df1m)
-        and "LH" in latest
-    ):
-        signal = "SELL"
-    else:
-        signal = "HOLD"
+    # ------------------------------------------------------------------
+    # Internal: run all 1m indicators (HTF S/R already in df if injected)
+    # ------------------------------------------------------------------
+    def _apply_indicators(self, df: pd.DataFrame, skip_sr: bool = False) -> pd.DataFrame:
+        return self.indicators.compute_all(df, skip_sr=skip_sr)
 
-    df1m["signal_trendline_pullback"] = signal
-    return df1m
+    # ------------------------------------------------------------------
+    # Step 1 — Location: price near a key HTF level
+    # ------------------------------------------------------------------
+    def _compute_location(self, df: pd.DataFrame) -> tuple[pd.Series, pd.Series]:
+        distance_threshold = df["atr"] * 0.5
 
+        near_support    = df["close"].sub(df["support_line"]).abs()    <= distance_threshold
+        near_resistance = df["close"].sub(df["resistance_line"]).abs() <= distance_threshold
 
-def _signal_vwap_ema_continuation(df1m: pd.DataFrame, dfhtf: pd.DataFrame) -> pd.DataFrame:
-    htf_struct = indicators.htf_structure(dfhtf["high"], dfhtf["low"])
-    ema20      = indicators.ema(df1m["close"], 20)
-    ema50      = indicators.ema(df1m["close"], 50)
-    vwap_df    = indicators.vwap(df1m, reset="D")
-    vwap_vals  = vwap_df["vwap"]
-    close_now  = df1m["close"].iloc[-1]
-    ema20_now  = ema20.iloc[-1]
-    ema50_now  = ema50.iloc[-1]
-    vwap_now   = vwap_vals.iloc[-1]
+        return near_support, near_resistance
 
-    in_ema_zone = (
-        abs(close_now - ema20_now) / close_now < 0.002 or
-        abs(close_now - ema50_now) / close_now < 0.002 or
-        abs(close_now - vwap_now)  / close_now < 0.002
-    )
+    # ------------------------------------------------------------------
+    # Step 2 — VWAP confirmation (optional — participates in OR block)
+    # ------------------------------------------------------------------
+    def _compute_vwap_confirmation(self, df: pd.DataFrame) -> tuple[pd.Series, pd.Series]:
+        vwap_long  = (df["close"] > df["vwap"]) & (df["low"]  <= df["vwap"])
+        vwap_short = (df["close"] < df["vwap"]) & (df["high"] >= df["vwap"])
 
-    if (
-        htf_struct == "BULLISH"
-        and close_now > ema20_now > ema50_now
-        and in_ema_zone
-        and indicators.bullish_rejection_candle(df1m)
-    ):
-        signal = "BUY"
-    elif (
-        htf_struct == "BEARISH"
-        and close_now < ema20_now < ema50_now
-        and in_ema_zone
-        and indicators.bearish_rejection_candle(df1m)
-    ):
-        signal = "SELL"
-    else:
-        signal = "HOLD"
+        return vwap_long, vwap_short
 
-    df1m["signal_vwap_ema_continuation"] = signal
-    return df1m
+    # ------------------------------------------------------------------
+    # Steps 3 & 4 — Trigger (mandatory) + Confirmation (OR logic)
+    # ------------------------------------------------------------------
+    def _compute_base_signals(
+        self,
+        df:             pd.DataFrame,
+        near_support:   pd.Series,
+        near_resistance: pd.Series,
+        vwap_long:      pd.Series,
+        vwap_short:     pd.Series,
+    ) -> tuple[pd.Series, pd.Series]:
 
-def _signal_exhaustion_reversal(data: pd.DataFrame) -> pd.DataFrame:
-    df = data.copy()
-    df.columns = df.columns.str.lower().str.strip()
+        # LONG
+        long_trigger      = df["bullish_rejection"]
+        long_confirmation = (
+            df["rsi_turning_up"]
+            | df["delta_signal_long"]
+            | df["ema_bullish"]
+            | vwap_long
+        )
+        long_base = near_support & long_trigger & long_confirmation
 
-    # ── Indicators ─────────────────────────────────────
-    df = indicators.vwap(df, reset="D")
-    df["rsi"] = indicators.rsi(df["close"])
+        # SHORT
+        short_trigger      = df["bearish_rejection"]
+        short_confirmation = (
+            df["rsi_turning_down"]
+            | df["delta_signal_short"]
+            | df["ema_bearish"]
+            | vwap_short
+        )
+        short_base = near_resistance & short_trigger & short_confirmation
 
-    signals = []
+        return long_base, short_base
 
-    for i in range(len(df)):
-        if i < 20:   # warmup buffer
-            signals.append("HOLD")
-            continue
+    # ------------------------------------------------------------------
+    # Step 6 — Entry refinement: next candle breaks the rejection candle
+    #           shift(1) on both signal and anchor → zero lookahead
+    # ------------------------------------------------------------------
+    def _compute_refined_entries(
+        self,
+        df:         pd.DataFrame,
+        long_base:  pd.Series,
+        short_base: pd.Series,
+    ) -> tuple[pd.Series, pd.Series]:
 
-        sub_df = df.iloc[:i+1]
+        # Anchor: high/low of the rejection candle (bar i-1 relative to entry bar i)
+        rejection_high = df["high"].shift(1)
+        rejection_low  = df["low"].shift(1)
 
-        rsi_val = sub_df["rsi"].iloc[-1]
+        # Signal from the previous bar
+        long_signal_prev  = long_base.shift(1).fillna(False)
+        short_signal_prev = short_base.shift(1).fillna(False)
 
-        if (
-            rsi_val < 38
-            and indicators.price_reclaimed_vwap(sub_df["close"], sub_df["vwap"], lookback=5)
-            and indicators.bullish_rejection_candle(sub_df)
-        ):
-            signals.append("BUY")
+        # Current bar breaks the rejection candle's extreme
+        long_entry  = long_signal_prev  & (df["high"] > rejection_high)
+        short_entry = short_signal_prev & (df["low"]  < rejection_low)
 
-        elif (
-            rsi_val > 62
-            and indicators.price_rejected_vwap(sub_df["close"], sub_df["vwap"], lookback=5)
-            and indicators.bearish_rejection_candle(sub_df)
-        ):
-            signals.append("SELL")
+        return long_entry, short_entry
 
-        else:
-            signals.append("HOLD")
+    # ------------------------------------------------------------------
+    # Master method
+    # ------------------------------------------------------------------
+    def apply(self, df: pd.DataFrame, htf_sr_injected: bool = False) -> pd.DataFrame:
+        """
+        Apply the level-based reaction strategy to a 1m OHLCV DataFrame.
 
-    df["signal"] = signals
-    return df
+        Parameters
+        ----------
+        df               : 1m OHLCV DataFrame with DatetimeIndex.
+                           If htf_sr_injected=True, must already contain
+                           `support_line` and `resistance_line` columns.
+        htf_sr_injected  : Set True when HTF S/R was pre-computed and injected
+                           by TradingBot before calling this method. Prevents
+                           compute_all() from overwriting them with 1m S/R.
 
-# these are the three indicators add the one that he gave and the three that i created 
+        Returns
+        -------
+        DataFrame with all indicator columns plus:
+            long_entry  (bool) — bar on which to enter a long
+            short_entry (bool) — bar on which to enter a short
+        """
+        # Compute all 1m indicators; skip S/R if HTF levels already injected
+        df = self._apply_indicators(df, skip_sr=htf_sr_injected)
 
-def _signal_ema_trendline_confirmation(data:pd.DataFrame) -> pd.DataFrame:
-    return indicators.ema_crossing_reversal(ohlcv=data)
+        # Step 1 — Location
+        near_support, near_resistance = self._compute_location(df)
 
-def _signal_supertrend_indicator(data:pd.DataFrame) -> pd.DataFrame: # top 10 in tradingview
-     return indicators.supertrend(ohlcv=data)
+        # Step 2 — VWAP confirmation
+        vwap_long, vwap_short = self._compute_vwap_confirmation(df)
 
-def _signal_macd_ultimate(data:pd.DataFrame) -> pd.DataFrame:
-     return indicators.macd_ultimate(ohlcv=data)
+        # Steps 3 & 4 — Trigger + confirmation
+        long_base, short_base = self._compute_base_signals(
+            df, near_support, near_resistance, vwap_long, vwap_short
+        )
 
-def _signal_squeeze_momentum(data:pd.DataFrame) -> pd.DataFrame:
-     return indicators.squeeze_momentum(ohlcv=data)
+        # Step 6 — Refine: next-bar breakout (no lookahead)
+        long_entry, short_entry = self._compute_refined_entries(df, long_base, short_base)
+
+        # Step 7 — Attach
+        df["long_entry"]  = long_entry
+        df["short_entry"] = short_entry
+
+        return df
